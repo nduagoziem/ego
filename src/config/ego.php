@@ -28,7 +28,11 @@ return [
             'account_id' => env('NOMBA_ACCOUNT_ID'),
             'signature_key' => env('NOMBA_SIGNATURE_KEY'),
             'base_url' => env('NOMBA_BASE_URL')
-        ]
+        ],
+        'budpay' => [
+            'secret_key' => env("BUDPAY_SECRET_KEY"),
+            'public_key' => env("BUDPAY_PUBLIC_KEY")
+        ],
     ],
 
     'providers' => [
@@ -37,5 +41,6 @@ return [
         'stripe' => Emmy\Ego\Gateway\Stripe\Stripe::class,
         "credo" => Emmy\Ego\Gateway\Credo\Credo::class,
         'nomba' => Emmy\Ego\Gateway\Nomba\Nomba::class,
+        'budpay' => Emmy\Ego\Gateway\BudPay\BudPay::class,
     ],
 ];
