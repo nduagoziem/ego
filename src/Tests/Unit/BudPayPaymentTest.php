@@ -32,7 +32,6 @@ test("can make payment", function () {
         "amount" => "100000",
         "email" => "test@example.com",
         'currency' => 'NGN',
-        'callback' => 'http://goggle.com',
         'reference' => Str::uuid(),
     ]);
 
@@ -88,7 +87,12 @@ test("can make transfer", function () {
         'currency' => 'NGN',
         'bank_name' => 'GUARANTY TRUST BANK',
         'narration' => 'Test transfer',
-        'reference' => Str::uuid(),
+        "meta_data" => [
+            [
+                "sender_name" => "Nium Consult",
+                "sender_address" => "New Orleans, USA"
+            ]
+        ],
     ]);
 
     $response = $paymentFactory->transfer($prepare);
@@ -137,7 +141,7 @@ test("can make bulk transfer", function () {
 
     $paymentFactory = new PaymentFactory("budpay");
 
-    $prepare = $paymentFactory->prepareForBulkTransfer([
+    $prepare = $paymentFactory->prepareForTransfer([
         "currency" => "NGN",
         "transfers" => [
             [
@@ -164,7 +168,7 @@ test("can make bulk transfer", function () {
         ]
     ]);
 
-    $response = $paymentFactory->bulkTransfer($prepare);
+    $response = $paymentFactory->transfer($prepare);
 
     $this->assertTrue($response['success']);
     $this->assertSame('pending', data_get($response, 'data.status'));
@@ -184,7 +188,7 @@ test("can verify transfer", function () {
 
     $paymentFactory = new PaymentFactory("budpay");
 
-    $response = $paymentFactory->verifyTransfer("wdwdwdwd");
+    $response = $paymentFactory->verifyPayment("wdwdwdwd", 'payout');
 
     $this->assertTrue($response["status"]);
 });
@@ -204,6 +208,5 @@ test("can verify payment", function () {
     $paymentFactory = new PaymentFactory("budpay");
 
     $response = $paymentFactory->verifyPayment("1780311387205904");
-
     $this->assertTrue($response["status"]);
 });

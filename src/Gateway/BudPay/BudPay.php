@@ -69,7 +69,7 @@ class BudPay extends Tollgate implements PaymentGatewayInterface
         if ($reference) {
             $this->setReference($reference);
         }
-        $this->setCallbackURL($callbackUrl);
+        $this->setCallback($callbackUrl);
 
         return $this->builder;
     }
@@ -147,10 +147,24 @@ class BudPay extends Tollgate implements PaymentGatewayInterface
 
     /**
      * @inheritDoc
-     * Prepare for a 'single' budpay transfer.
+     * Prepare for single or bulk BudPay transfers.
      */
     public function prepareForTransfer(array $data): array
     {
+        // Bulk transfer is identified by the presence of the 'transfers' key in the request array.
+        $transfers = searchArrayAsArray("transfers", $data);
+        if ($transfers) {
+
+            $currency = searchArray("currency", $data);
+            $transfers = searchArrayAsArray("transfers", $data);
+
+            $this->setCurrency($currency);
+            $this->setTransfers($transfers);
+
+            return $this->builder;
+        }
+
+        // Single transfer preparation.
         $currency = searchArray("currency", $data);
         $amount = searchArray("amount", $data);
         $accountNumber = searchArray("account_number", $data);
@@ -158,7 +172,7 @@ class BudPay extends Tollgate implements PaymentGatewayInterface
         $narration = searchArray("narration", $data);
         $bankName = searchArray("bank_name", $data);
         $metadata = searchArrayAsArray("meta_data", $data);
-        $paymentMode = searchArray("payment_mode", $data); // Available for Kenya only at the time of building.
+        $paymentMode = searchArray("paymentMode", $data) ?? searchArray("payment_mode", $data); // Available for Kenya only at the time of building.
 
         $this->setCurrency($currency);
         $this->setAmount($amount);
@@ -167,40 +181,39 @@ class BudPay extends Tollgate implements PaymentGatewayInterface
         $this->setAccountNumber($accountNumber);
         $this->setBankName($bankName);
         if ($metadata) {
-            $this->setMetadata($metadata);
+            $this->builder['meta_data'] = $metadata;
         }
         if ($paymentMode) {
-            $this->setPaymentMode($paymentMode);
+            $this->builder['paymentMode'] = $paymentMode;
         }
 
         return $this->builder;
     }
-
-    /**
-     * Prepare for a 'bulk' budpay transfer.
-     * @param array $data
-     * @return array
-     */
-    public function prepareForBulkTransfer(array $data): array
-    {
-        $currency = searchArray("currency", $data);
-        $transfers = searchArrayAsArray("transfers", $data);
-
-        $this->setCurrency($currency);
-        $this->setTransfers($transfers);
-
-        return $this->builder;
-    }
-
 
     /**
      * @inheritDoc
-     * Handles 'single' budpay transfers.
+     * 
      */
     public function transfer(array $data): array
     {
         $payload = $this->buildPayload($data);
 
+        if (isset($payload['transfers']) && \is_array($payload['transfers'])) {
+            return $this->handleTransfer('api/v2/bulk_bank_transfer', $payload);
+        }
+
+        return $this->handleTransfer('api/v2/bank_transfer', $payload);
+    }
+
+
+    /**
+     * Handles budpay transfers - both single and bulk.
+     * @param string $endpoint
+     * @param array $payload
+     * @return array
+     */
+    private function handleTransfer(string $endpoint, array $payload): array
+    {
         ksort($payload);
 
         $hmacSignature = hash_hmac(
@@ -209,43 +222,10 @@ class BudPay extends Tollgate implements PaymentGatewayInterface
             $this->publicKey
         );
 
-        return $this->post('api/v2/bank_transfer', $payload, [
+        return $this->post($endpoint, $payload, [
             'Encryption' => $hmacSignature,
             'Content-Type' => 'application/json',
         ]);
-    }
-
-    /**
-     * Handles 'bulk' budpay transfers.
-     * @param array $data
-     * @return array
-     */
-    public function bulkTransfer(array $data): array
-    {
-        $payload = $this->buildPayload($data);
-
-        ksort($payload);
-
-        $hmacSignature = hash_hmac(
-            'sha512',
-            json_encode($payload),
-            $this->publicKey
-        );
-
-        return $this->post('api/v2/bulk_bank_transfer', $payload, [
-            'Encryption' => $hmacSignature,
-            'Content-Type' => 'application/json',
-        ]);
-    }
-
-    /**
-     * Verifies if a transfer is successful or not - both single and bulk transfers.
-     * @param string $transferReference
-     * @return array
-     */
-    public function verifyTransfer(string $transferReference): array
-    {
-        return $this->get("api/v2/payout/{$transferReference}");
     }
 
     /**
@@ -253,21 +233,67 @@ class BudPay extends Tollgate implements PaymentGatewayInterface
      */
     public function verifyPayment(array|string $budPayReference, ?string $paymentType = null): array
     {
+        $paymentType = $paymentType !== null ? strtolower($paymentType) : null;
+        $reference = null;
+        $route = 'transaction';
 
-        if ($paymentType !== null && $paymentType !== 'transaction') {
-            throw new \InvalidArgumentException("Invalid Payment type.\n Payment type should be 'transaction'");
+        if (\is_array($budPayReference)) {
+            $reference = $this->resolveBudPayReference($budPayReference);
+            $route = $this->getBudPayVerifyRoute($budPayReference, $paymentType);
+        } else {
+            $reference = $budPayReference;
+            if ($paymentType !== null) {
+                $route = $this->mapBudPayVerifyRoute($paymentType);
+            }
         }
-
-        $route = $paymentType ?? 'transaction';
-
-        $reference = \is_array($budPayReference) ? ($budPayReference['data']['reference'] ?? $budPayReference['reference'] ?? null)
-            : $budPayReference;
 
         if (!$reference) {
             throw new \InvalidArgumentException('Payment reference is required');
         }
 
-        return $this->get("api/v2/{$route}/verify/{$reference}");
+        return $this->get(
+            $route === 'payout'
+                ? "api/v2/payout/{$reference}"
+                : "api/v2/transaction/verify/{$reference}"
+        );
+    }
+
+    // Resolves the BudPay reference from the given payload.
+    private function resolveBudPayReference(array $payload): ?string
+    {
+        return $payload['data']['reference'] ??
+            $payload['reference'] ??
+            $payload['transferDetails']['paymentReference'] ??
+            null;
+    }
+
+    // Determines the appropriate BudPay verification route based on the payload and optional payment type.
+    private function getBudPayVerifyRoute(array $payload, ?string $paymentType = null): string
+    {
+        if ($paymentType !== null) {
+            return $this->mapBudPayVerifyRoute($paymentType);
+        }
+
+        $event = strtolower((string) ($payload['notify'] ?? $payload['event'] ?? ''));
+        if ($event === 'payout') {
+            return 'payout';
+        }
+
+        if (isset($payload['transferDetails']['paymentReference'])) {
+            return 'payout';
+        }
+
+        return 'transaction';
+    }
+
+    // Maps generic payment types to BudPay-specific verification routes.
+    private function mapBudPayVerifyRoute(string $paymentType): string
+    {
+        return match ($paymentType) {
+            'transaction', 'payment' => 'transaction',
+            'payout', 'transfer', 'bank_transfer' => 'payout',
+            default => throw new \InvalidArgumentException("Invalid Payment type. \n Payment type should be 'transaction' or 'payout'."),
+        };
     }
 
     /**
@@ -293,9 +319,10 @@ class BudPay extends Tollgate implements PaymentGatewayInterface
         }
 
         try {
-            $verification = $event === 'payout'
-                ? $this->verifyTransfer($reference)
-                : $this->verifyPayment($reference);
+            $verification = $this->verifyPayment(
+                $reference,
+                $event === 'payout' ? 'payout' : 'transaction'
+            );
         } catch (\Throwable) {
             abort(401, "Webhook not verified");
         }
