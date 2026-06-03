@@ -488,9 +488,8 @@ The following methods are available for BudPay in this package:
 - All the methods defined in the interface
 - `getBanksByCurrency()`
 - `calculateTransferFee()`
-- `prepareForBulkTransfer()`
-- `bulkTransfer()`
-- `verifyTransfer()`
+- `verifyPayment()` for both transaction and payout verification
+- bulk transfers via `prepareForTransfer()` + `transfer()`
 
 ### BudPay Configuration
 
@@ -512,7 +511,7 @@ You can get these values from your BudPay dashboard API credentials section.
 
 BudPay authenticates API requests with your secret key as a Bearer token. The package handles this automatically through the configured `BUDPAY_SECRET_KEY`.
 
-For payout endpoints, BudPay also requires an HMAC-SHA-512 value in the `Encryption` header. The package automatically sorts the payout payload, signs it with `BUDPAY_PUBLIC_KEY`, and adds the `Encryption` header when you call `transfer()` or `bulkTransfer()`.
+For payout endpoints, BudPay also requires an HMAC-SHA-512 value in the `Encryption` header. The package automatically sorts the payout payload, signs it with `BUDPAY_PUBLIC_KEY`, and adds the `Encryption` header when you call `transfer()`.
 
 ### BudPay Special Cases
 
@@ -546,18 +545,20 @@ $response = $paymentFactory->pay($payload);
 
 #### Case 2: Verifying Payments
 
-BudPay payment verification uses the transaction reference. `verifyPayment()` accepts a string reference or an array containing `reference` or `data.reference`.
+BudPay payment verification uses the transaction reference. `verifyPayment()` accepts a string reference or an array containing `reference`, `data.reference`, or `transferDetails.paymentReference`.
 
 ```php
 $status = $paymentFactory->verifyPayment('order-ref-001');
 ```
 
-If you pass the optional `$paymentType`, it must be `transaction`:
+If you pass the optional `$paymentType`, it must be `transaction or payout`. `null` or leaving it empty defaults to  transaction:
 
 ```php
 $status = $paymentFactory->verifyPayment('order-ref-001', 'transaction');
 ```
-
+```php
+$status = $paymentFactory->verifyPayment('order-ref-001', 'payout');
+```
 #### Case 3: Banks and Account Number Lookup
 
 You can fetch the full BudPay bank list with `getBanks()` or fetch banks for a specific currency with `getBanksByCurrency()`. BudPay currently documents bank-list support for currencies such as `NGN`, `USD`, `GHS`, and `KES`.
@@ -569,6 +570,14 @@ $banks = $paymentFactory->getBanks();
 $nigerianBanks = $paymentFactory->getGatewayInstance()->getBanksByCurrency('NGN');
 ```
 
+or 
+
+```php
+$paymentFactory = new PaymentFactory('budpay');
+
+$banks = $paymentFactory->getBanks();
+$nigerianBanks = $paymentFactory->getBanksByCurrency('NGN');
+```
 Before making a payout, you can verify the recipient's account name:
 
 ```php
@@ -618,13 +627,21 @@ $fee = $paymentFactory->getGatewayInstance()->calculateTransferFee([
     'amount'   => '10000',
 ]);
 ```
-
-For bulk payouts, prepare a currency and an array of transfer items, then call `bulkTransfer()` on the underlying gateway instance:
+or
 
 ```php
-$gateway = $paymentFactory->getGatewayInstance();
+$fee = $paymentFactory->calculateTransferFee([
+    'currency' => 'NGN',
+    'amount'   => '10000',
+]);
+```
 
-$payload = $gateway->prepareForBulkTransfer([
+For bulk payouts, prepare a currency and an array of transfer items, then call `prepareForTransfer()` and `transfer()`:
+
+```php
+$paymentFactory = new PaymentFactory('budpay');
+
+$payload = $paymentFactory->prepareForTransfer([
     'currency' => 'NGN',
     'transfers' => [
         [
@@ -637,7 +654,7 @@ $payload = $gateway->prepareForBulkTransfer([
     ],
 ]);
 
-$response = $gateway->bulkTransfer($payload);
+$response = $paymentFactory->transfer($payload);
 ```
 
 #### Case 6: Verifying Transfers
@@ -645,14 +662,14 @@ $response = $gateway->bulkTransfer($payload);
 Single and bulk payouts can be verified with the BudPay payout reference returned by the transfer response:
 
 ```php
-$status = $paymentFactory->getGatewayInstance()->verifyTransfer('trf_reference');
+$status = $paymentFactory->verifyPayment('trf_reference', 'payout');
 ```
 
 #### Case 7: Webhook Verification
 
 BudPay webhook verification in this package verifies the webhook by calling BudPay's API again and comparing the webhook reference and status with the verified response. The incoming request must be a `POST`, include a supported `notify` value (`transaction`, `virtual_account`, or `payout`), and contain a reference in `data.reference`, `transferDetails.paymentReference`, or `reference`.
 
-For `payout` notifications, the package calls `verifyTransfer()`. For other supported notifications, it calls `verifyPayment()`. If the verified reference or status does not match the webhook payload, the request is rejected.
+For `payout` notifications, the package calls `verifyPayment()` with the payout route. For other supported notifications, it calls `verifyPayment()` for transaction verification. If the verified reference or status does not match the webhook payload, the request is rejected.
 
 ---
 
