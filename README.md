@@ -24,6 +24,10 @@ For something more complex, you should consider using your preferred gateway's S
         - [Configuration](#nomba-configuration)
         - [Authentication](#nomba-authentication)
         - [Special Cases](#nomba-special-cases)
+    - [BudPay](#budpay)
+        - [Configuration](#budpay-configuration)
+        - [Authentication](#budpay-authentication)
+        - [Special Cases](#budpay-special-cases)
 - [Webhook Strategy](#webhook-strategy)
 - [Contributing](#contributing)
 
@@ -186,6 +190,10 @@ return [
             'signature_key' => env('NOMBA_SIGNATURE_KEY'),
             'base_url'      => env('NOMBA_BASE_URL'),
         ],
+        'budpay' => [
+            'secret_key' => env('BUDPAY_SECRET_KEY'),
+            'public_key' => env('BUDPAY_PUBLIC_KEY'),
+        ],
     ],
 
     'providers' => [
@@ -193,6 +201,7 @@ return [
         'flutterwave' => Emmy\Ego\Gateway\Flutterwave\Flutterwave::class,
         'stripe'      => Emmy\Ego\Gateway\Stripe\Stripe::class,
         'nomba'       => Emmy\Ego\Gateway\Nomba\Nomba::class,
+        'budpay'      => Emmy\Ego\Gateway\BudPay\BudPay::class,
     ],
 ];
 ```
@@ -468,6 +477,199 @@ The verification process:
 3. Computes an HMAC-SHA256 hash using your signature key and compares it against the `nomba-signature` header.
 
 If the signatures do not match, an `ApiException` is thrown.
+
+---
+
+## BudPay
+
+[BudPay](https://developer.budpay.com) lets you accept payments, verify transactions, validate bank accounts, and make single or bulk payouts. Once you know the typical request parameters required by BudPay, you can plug them into the appropriate method and use it straight away.
+
+The following methods are available for BudPay in this package:
+- All the methods defined in the interface
+- `getBanksByCurrency()`
+- `calculateTransferFee()`
+- `verifyPayment()` for both transaction and payout verification
+- bulk transfers via `prepareForTransfer()` + `transfer()`
+
+### BudPay Configuration
+
+Add the following environment variables to your `.env` file:
+
+```dotenv
+BUDPAY_SECRET_KEY=your_secret_key
+BUDPAY_PUBLIC_KEY=your_public_key
+```
+
+You can get these values from your BudPay dashboard API credentials section.
+
+| Variable             | Description                                                                 |
+|----------------------|-----------------------------------------------------------------------------|
+| `BUDPAY_SECRET_KEY`  | Secret key used for Bearer-token authentication against BudPay API requests |
+| `BUDPAY_PUBLIC_KEY`  | Public key used by this package to sign payout request payloads             |
+
+### BudPay Authentication
+
+BudPay authenticates API requests with your secret key as a Bearer token. The package handles this automatically through the configured `BUDPAY_SECRET_KEY`.
+
+For payout endpoints, BudPay also requires an HMAC-SHA-512 value in the `Encryption` header. The package automatically sorts the payout payload, signs it with `BUDPAY_PUBLIC_KEY`, and adds the `Encryption` header when you call `transfer()`.
+
+### BudPay Special Cases
+
+#### Case 1: Payment payload fields
+
+BudPay Standard creates a hosted checkout URL by initializing a transaction. When using `prepareForPayment($array)`, the following will be extracted:
+
+| Key(s) in your array                  | Description                                      |
+|---------------------------------------|--------------------------------------------------|
+| `email`                               | Customer's email address                         |
+| `amount`                              | Amount to charge                                 |
+| `currency`                            | Currency code, for example `NGN`                 |
+| `first_name` / `firstName`            | Customer's first name                            |
+| `last_name` / `lastName`              | Customer's last name                             |
+| `reference`                           | Your unique transaction reference                |
+| `callback` / `callbackUrl` / `callback_url` | URL BudPay redirects to after payment     |
+
+```php
+$paymentFactory = new PaymentFactory('budpay');
+
+$payload = $paymentFactory->prepareForPayment([
+    'email'        => 'customer@example.com',
+    'amount'       => '5000',
+    'currency'     => 'NGN',
+    'reference'    => 'order-ref-001',
+    'callback_url' => 'https://yourapp.com/payment/callback',
+]);
+
+$response = $paymentFactory->pay($payload);
+```
+
+#### Case 2: Verifying Payments
+
+BudPay payment verification uses the transaction reference. `verifyPayment()` accepts a string reference or an array containing `reference`, `data.reference`, or `transferDetails.paymentReference`.
+
+```php
+$status = $paymentFactory->verifyPayment('order-ref-001');
+```
+
+If you pass the optional `$paymentType`, it must be `transaction or payout`. `null` or leaving it empty defaults to  transaction:
+
+```php
+$status = $paymentFactory->verifyPayment('order-ref-001', 'transaction');
+```
+```php
+$status = $paymentFactory->verifyPayment('order-ref-001', 'payout');
+```
+#### Case 3: Banks and Account Number Lookup
+
+You can fetch the full BudPay bank list with `getBanks()` or fetch banks for a specific currency with `getBanksByCurrency()`. BudPay currently documents bank-list support for currencies such as `NGN`, `USD`, `GHS`, and `KES`.
+
+```php
+$paymentFactory = new PaymentFactory('budpay');
+
+$banks = $paymentFactory->getBanks();
+$nigerianBanks = $paymentFactory->getGatewayInstance()->getBanksByCurrency('NGN');
+```
+
+or 
+
+```php
+$paymentFactory = new PaymentFactory('budpay');
+
+$banks = $paymentFactory->getBanks();
+$nigerianBanks = $paymentFactory->getBanksByCurrency('NGN');
+```
+Before making a payout, you can verify the recipient's account name:
+
+```php
+$result = $paymentFactory->verifyAccountNumber([
+    'bank_code'      => '000013',
+    'account_number' => '0050883605',
+]);
+```
+
+#### Case 4: Transfer payload fields
+
+BudPay supports single payouts to bank accounts. When using `prepareForTransfer($array)`, the following will be extracted:
+
+| Key(s) in your array | Description                                             |
+|----------------------|---------------------------------------------------------|
+| `currency`           | Transfer currency, for example `NGN`, `KES`, or `GHS`   |
+| `amount`             | Transfer amount                                         |
+| `account_number`     | Recipient's bank account number                         |
+| `bank_code`          | Recipient's bank code from BudPay's bank list           |
+| `bank_name`          | Recipient's bank name                                   |
+| `narration`          | Transfer narration or purpose                           |
+| `meta_data`          | Optional additional transfer metadata                   |
+| `payment_mode`       | Optional payment mode; useful for supported markets     |
+
+```php
+$paymentFactory = new PaymentFactory('budpay');
+
+$payload = $paymentFactory->prepareForTransfer([
+    'currency'       => 'NGN',
+    'amount'         => '10000',
+    'bank_code'      => '000013',
+    'bank_name'      => 'GUARANTY TRUST BANK',
+    'account_number' => '0050883605',
+    'narration'      => 'Vendor payment',
+]);
+
+$response = $paymentFactory->transfer($payload);
+```
+
+#### Case 5: Transfer Fees and Bulk Transfers
+
+BudPay lets you calculate payout fees before sending money:
+
+```php
+$fee = $paymentFactory->getGatewayInstance()->calculateTransferFee([
+    'currency' => 'NGN',
+    'amount'   => '10000',
+]);
+```
+or
+
+```php
+$fee = $paymentFactory->calculateTransferFee([
+    'currency' => 'NGN',
+    'amount'   => '10000',
+]);
+```
+
+For bulk payouts, prepare a currency and an array of transfer items, then call `prepareForTransfer()` and `transfer()`:
+
+```php
+$paymentFactory = new PaymentFactory('budpay');
+
+$payload = $paymentFactory->prepareForTransfer([
+    'currency' => 'NGN',
+    'transfers' => [
+        [
+            'amount'         => '20000',
+            'bank_code'      => '000013',
+            'bank_name'      => 'GUARANTY TRUST BANK',
+            'account_number' => '0050883605',
+            'narration'      => 'January salary',
+        ],
+    ],
+]);
+
+$response = $paymentFactory->transfer($payload);
+```
+
+#### Case 6: Verifying Transfers
+
+Single and bulk payouts can be verified with the BudPay payout reference returned by the transfer response:
+
+```php
+$status = $paymentFactory->verifyPayment('trf_reference', 'payout');
+```
+
+#### Case 7: Webhook Verification
+
+BudPay webhook verification in this package verifies the webhook by calling BudPay's API again and comparing the webhook reference and status with the verified response. The incoming request must be a `POST`, include a supported `notify` value (`transaction`, `virtual_account`, or `payout`), and contain a reference in `data.reference`, `transferDetails.paymentReference`, or `reference`.
+
+For `payout` notifications, the package calls `verifyPayment()` with the payout route. For other supported notifications, it calls `verifyPayment()` for transaction verification. If the verified reference or status does not match the webhook payload, the request is rejected.
 
 ---
 
