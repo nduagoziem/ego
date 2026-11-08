@@ -28,6 +28,10 @@ For something more complex, you should consider using your preferred gateway's S
         - [Configuration](#budpay-configuration)
         - [Authentication](#budpay-authentication)
         - [Special Cases](#budpay-special-cases)
+    - [PayPal](#paypal)
+        - [Configuration](#paypal-configuration)
+        - [Authentication](#paypal-authentication)
+        - [Special Cases](#paypal-special-cases)
 - [Webhook Strategy](#webhook-strategy)
 - [Contributing](#contributing)
 
@@ -194,6 +198,13 @@ return [
             'secret_key' => env('BUDPAY_SECRET_KEY'),
             'public_key' => env('BUDPAY_PUBLIC_KEY'),
         ],
+        'paypal' => [
+            'client_id'         => env('PAYPAL_CLIENT_ID'),
+            'client_secret'     => env('PAYPAL_CLIENT_SECRET'),
+            'url'               => env('PAYPAL_URL', 'https://api-m.sandbox.paypal.com'),
+            'bn_code'           => env('PAYPAL_BN_CODE'),
+            'paypal_webhook_id' => env('PAYPAL_WEBHOOK_ID'),
+        ],
     ],
 
     'providers' => [
@@ -202,6 +213,7 @@ return [
         'stripe'      => Emmy\Ego\Gateway\Stripe\Stripe::class,
         'nomba'       => Emmy\Ego\Gateway\Nomba\Nomba::class,
         'budpay'      => Emmy\Ego\Gateway\BudPay\BudPay::class,
+        'paypal'      => Emmy\Ego\Gateway\Paypal\Paypal::class,
     ],
 ];
 ```
@@ -670,6 +682,250 @@ $status = $paymentFactory->verifyPayment('trf_reference', 'payout');
 BudPay webhook verification in this package verifies the webhook by calling BudPay's API again and comparing the webhook reference and status with the verified response. The incoming request must be a `POST`, include a supported `notify` value (`transaction`, `virtual_account`, or `payout`), and contain a reference in `data.reference`, `transferDetails.paymentReference`, or `reference`.
 
 For `payout` notifications, the package calls `verifyPayment()` with the payout route. For other supported notifications, it calls `verifyPayment()` for transaction verification. If the verified reference or status does not match the webhook payload, the request is rejected.
+
+---
+
+## PayPal
+
+[PayPal](https://developer.paypal.com/docs/api/orders/v2/) payments in this package use the PayPal **Orders v2** API. The buyer is sent to a PayPal-hosted page to approve the payment, and the package captures it when you verify.
+
+The following methods are available for PayPal in this package:
+- `prepareForPayment()`, `pay()`, `verifyPayment()` / `verifyTransaction()`, `verifyWebhook()`, `setKey()` and `getPayload()`
+- `generatePayPalAuthAssertion()`, for when you act on behalf of another merchant
+
+`transfer()`, `getBanks()` and `verifyAccountNumber()` are **not supported**. They throw `Emmy\Ego\Exception\UnsupportedGatewayMethodExeption`.
+
+### PayPal Configuration
+
+Add the following environment variables to your `.env` file:
+
+```dotenv
+PAYPAL_CLIENT_ID=your_client_id
+PAYPAL_CLIENT_SECRET=your_client_secret
+PAYPAL_URL=https://api-m.sandbox.paypal.com
+PAYPAL_WEBHOOK_ID=your_webhook_id
+PAYPAL_BN_CODE=your_partner_bn_code
+```
+
+| Variable               | Description                                                                                                         |
+|------------------------|---------------------------------------------------------------------------------------------------------------------|
+| `PAYPAL_CLIENT_ID`     | REST app client id from the PayPal Developer Dashboard                                                              |
+| `PAYPAL_CLIENT_SECRET` | REST app secret                                                                                                     |
+| `PAYPAL_URL`           | API host **without** a version path. Defaults to `https://api-m.sandbox.paypal.com`. Use `https://api-m.paypal.com` for live |
+| `PAYPAL_WEBHOOK_ID`    | ID of the webhook you registered in the dashboard. **Required** for `verifyWebhook()`                                |
+| `PAYPAL_BN_CODE`       | Optional. Partner attribution (BN) code, sent as `PayPal-Partner-Attribution-Id`                                    |
+
+> Don't add `/v1` or `/v2` to `PAYPAL_URL`. The package adds the right version to each request (`/v1/oauth2/token`, `/v2/checkout/orders`).
+
+You can also pass credentials at runtime. Each key is optional and falls back to the config value:
+
+```php
+$paymentFactory = new PaymentFactory('paypal', [
+    'client_id'     => 'another_client_id',
+    'client_secret' => 'another_secret',   // `secret_key` is also accepted
+    'bn_code'       => 'BN-CODE',          // `bnCode` is also accepted
+    'url'           => 'https://api-m.paypal.com',
+]);
+```
+
+Passing a plain string as the key replaces only the client secret.
+
+### PayPal Authentication
+
+PayPal uses OAuth 2.0 client credentials. The package exchanges your client id and secret for an access token and handles this automatically:
+
+- The token is cached with your default Laravel cache store. It expires about a minute before PayPal's own expiry.
+- The cache entry is tied to the client id, so switching credentials with `setKey()` never reuses another account's token.
+- If authentication fails, an `ApiException` is thrown and nothing is cached. A `401` on a later request clears the cached token, so the next call fetches a new one.
+
+### PayPal Special Cases
+
+#### Case 1: Payment payload fields
+
+When using `prepareForPayment($array)`, the following will be extracted:
+
+| Key(s) in your array          | Description                                                                                     |
+|-------------------------------|-------------------------------------------------------------------------------------------------|
+| `amount`                      | Amount in **major units** (e.g. `10.50`, not `1050`). Sent to PayPal as a string                |
+| `currency`                    | ISO currency code, e.g. `USD`                                                                   |
+| `reference`                   | Your own reference. Sent as `purchase_units[0].reference_id`                                    |
+| `email`                       | The **buyer's** email. PayPal uses it to prefill its login page                                 |
+| `callback_url` / `callbackUrl` | Used as both the return URL and the cancel URL, unless you set them separately               |
+| `return_url` / `returnUrl`    | Where PayPal sends the buyer after they approve the payment                                     |
+| `cancel_url` / `cancelUrl`    | Where PayPal sends the buyer if they cancel                                                     |
+| `merchant_id` / `merchantId`  | Optional. PayPal merchant id of the seller you're collecting for (see Case 3)                 |
+| `purchase_units`              | Optional. Your own `purchase_units` array (see Case 2)                                         |
+| `payment_source`              | Optional. Your own `payment_source` object (see Case 2). `purchase_source` is also accepted   |
+
+```php
+$paymentFactory = new PaymentFactory('paypal');
+
+$payload = $paymentFactory->prepareForPayment([
+    'amount'     => '25.00',
+    'currency'   => 'USD',
+    'reference'  => 'order-ref-001',
+    'email'      => 'buyer@example.com',
+    'return_url' => 'https://yourapp.com/paypal/return',
+    'cancel_url' => 'https://yourapp.com/paypal/cancel',
+]);
+
+$response = $paymentFactory->pay($payload);
+
+return redirect($response['url']);
+```
+
+`pay()` returns:
+
+| Key           | Description                                                                         |
+|---------------|-------------------------------------------------------------------------------------|
+| `status`      | `true` when the order was created                                                    |
+| `url`         | The PayPal page to redirect the buyer to (the `payer-action` / `approve` link)       |
+| `id`          | The **PayPal order id**. Save it, because you need it to verify the payment          |
+| `reference`   | Your `reference`, as PayPal echoed it back                                           |
+| `api_message` | PayPal's full response                                                               |
+
+> **Edge cases:**
+> - `customer_id` / `customerId` are **not** read for PayPal. Other gateways use them for the buyer, but in PayPal a merchant id marks the account that *receives* the money. Use `merchant_id` only for a seller's PayPal merchant id.
+> - A request that fails (e.g. an unsupported currency, or a `422` from PayPal) throws `Emmy\Ego\Exception\ApiException`. The message includes PayPal's error body.
+> - If PayPal's response contains no approval link, an `ApiException` is thrown instead of returning an empty `url`.
+
+#### Case 2: Building `purchase_units` / `payment_source` yourself (optional)
+
+By default, the package builds the order body from the fields above:
+
+```php
+[
+    'intent' => 'CAPTURE',
+    'purchase_units' => [[
+        'reference_id' => $reference,
+        'amount' => ['value' => (string) $amount, 'currency_code' => $currency],
+        // 'payee' => ['merchant_id' => $merchantId],  // only when merchant_id is given
+    ]],
+    'payment_source' => [
+        'paypal' => [
+            'email_address' => $email,            // left out when empty
+            'experience_context' => [
+                'user_action' => 'PAY_NOW',
+                'return_url'  => $returnUrl ?? $callbackUrl,
+                'cancel_url'  => $cancelUrl ?? $callbackUrl,
+            ],
+        ],
+    ],
+]
+```
+
+For anything this doesn't cover, build either part yourself. Some examples are several items, shipping, `brand_name`, `locale`, `shipping_preference`, or another payment source such as `card` or `venmo`. Whatever you pass is sent to PayPal **as-is**, and the package's default for that part is skipped:
+
+```php
+$paymentFactory->prepareForPayment([
+    'amount'    => '40.00',          // still used by the default purchase_units if you don't pass your own
+    'currency'  => 'USD',
+    'reference' => 'order-ref-002',
+    'payment_source' => [
+        'paypal' => [
+            'experience_context' => [
+                'brand_name'          => 'My Store',
+                'locale'              => 'en-US',
+                'shipping_preference' => 'NO_SHIPPING',
+                'user_action'         => 'PAY_NOW',
+                'return_url'          => 'https://yourapp.com/paypal/return',
+                'cancel_url'          => 'https://yourapp.com/paypal/cancel',
+            ],
+        ],
+    ],
+]);
+
+$response = $paymentFactory->pay();
+```
+
+```php
+$paymentFactory->pay([
+    'purchase_units' => [[
+        'reference_id' => 'order-ref-003',
+        'description'  => 'Two T-shirts',
+        'amount' => [
+            'currency_code' => 'USD',
+            'value' => '30.00',
+            'breakdown' => ['item_total' => ['currency_code' => 'USD', 'value' => '30.00']],
+        ],
+        'items' => [
+            ['name' => 'T-shirt', 'quantity' => '2', 'unit_amount' => ['currency_code' => 'USD', 'value' => '15.00']],
+        ],
+    ]],
+    'return_url' => 'https://yourapp.com/paypal/return',
+    'cancel_url' => 'https://yourapp.com/paypal/cancel',
+]);
+```
+
+> **Edge cases:**
+> - These replace the defaults **entirely**. They are not merged. If you pass your own `payment_source`, then `email`, `callback_url`, `return_url` and `cancel_url` are ignored, so put the URLs inside `experience_context` yourself. If you pass your own `purchase_units`, then `amount`, `currency`, `reference` and `merchant_id` are not put into the body. In that case, add `payee` yourself when collecting for a seller.
+> - When you pass your own `purchase_units`, the `reference` returned by `pay()` / `verifyPayment()` is the first unit's `reference_id`. Set one if you rely on it.
+> - The intent is always `CAPTURE`. `AUTHORIZE` orders are not supported.
+
+#### Case 3: Collecting on behalf of a merchant (platforms / marketplaces)
+
+If you're a PayPal partner collecting for a seller who has onboarded with your platform, pass their PayPal `merchant_id`:
+
+```php
+$paymentFactory->prepareForPayment([
+    'amount'       => '25.00',
+    'currency'     => 'USD',
+    'reference'    => 'order-ref-004',
+    'merchant_id'  => 'SELLER_MERCHANT_ID',
+    'callback_url' => 'https://yourapp.com/paypal/return',
+]);
+$paymentFactory->pay();
+```
+
+When you do, the package:
+- sets `purchase_units[0].payee.merchant_id`, so the seller receives the funds
+- sends a `PayPal-Auth-Assertion` header (an unsigned JWT that identifies your client id and the seller's payer id) on that request
+
+You can also set it with `$paymentFactory->setMerchantId('SELLER_MERCHANT_ID')`. Calls such as `verifyPayment()` on that same instance also include the auth assertion. Use a separate `PaymentFactory` instance per seller.
+
+#### Case 4: Verifying (and capturing) payments
+
+After the buyer approves, PayPal redirects them to your `return_url` with the order id in the query string: `?token=5O190127TN364715T&PayerID=...`.
+
+`verifyPayment()` accepts that order id as a string, or an array containing `token`, `order_id`, `orderId`, `id` or `reference`. That means you can pass the query string directly:
+
+```php
+// In your return_url controller
+$status = $paymentFactory->verifyPayment($request->query());
+// or
+$status = $paymentFactory->verifyPayment('5O190127TN364715T');
+```
+
+> **Important:** In PayPal, an `APPROVED` order has **not** taken any money yet. Calling `verifyPayment()` on an `APPROVED` order captures it automatically, and the capture result is what you get back. The capture uses a fixed `PayPal-Request-Id` per order, so calling `verifyPayment()` again (from the return URL *and* a webhook, for example) won't charge the buyer twice.
+
+The returned `status` is mapped as follows:
+
+| PayPal order / capture state                                 | `status`  |
+|--------------------------------------------------------------|-----------|
+| Order `COMPLETED` (capture `COMPLETED`)                      | `SUCCESS` |
+| Order `COMPLETED` but capture `PENDING` (e.g. under review)  | `PENDING` |
+| Order `CREATED`, `SAVED`, `PAYER_ACTION_REQUIRED`            | `PENDING` |
+| Order `VOIDED`, or capture `DECLINED` / `FAILED`             | `FAILED`  |
+
+The response also has `message` (PayPal's raw order status), `reference` (your `reference_id`) and `data` (PayPal's full response).
+
+> **Edge cases:**
+> - `verifyPayment()` needs the **PayPal order id**, not your own `reference`. Save the `id` returned by `pay()` if you want to verify later without the return URL.
+> - An unknown order id, or any other API error, throws `ApiException`.
+> - The `$paymentType` argument is ignored for PayPal.
+
+#### Case 5: Webhook Verification
+
+`verifyWebhook($request)` checks PayPal's signature on the request itself, without calling PayPal's verify API. It uses the `PAYPAL-TRANSMISSION-ID`, `PAYPAL-TRANSMISSION-TIME`, `PAYPAL-TRANSMISSION-SIG`, `PAYPAL-AUTH-ALGO` and `PAYPAL-CERT-URL` headers, your `PAYPAL_WEBHOOK_ID`, and a CRC32 checksum of the raw request body. If the check fails, the request is aborted with a `404`.
+
+> **Edge cases:**
+> - `PAYPAL_WEBHOOK_ID` must be set. If it's missing, every webhook is rejected.
+> - The certificate is only downloaded from an `https` PayPal host (`api.paypal.com`, `api-m.paypal.com`, `api.sandbox.paypal.com`, `api-m.sandbox.paypal.com`). Any other `PAYPAL-CERT-URL` is rejected without being fetched, so attackers can't sign events with a certificate they host themselves.
+> - The certificate is cached for 24 hours.
+> - The signature is checked against the **raw** body. Don't change the request body before calling `verifyWebhook()`.
+> - Supported algorithms: `SHA256withRSA`, `SHA1withRSA`, `SHA512withRSA`.
+
+A typical approach is to listen for `CHECKOUT.ORDER.APPROVED` and call `verifyPayment($payload['resource']['id'])`, which captures the order. Then fulfil the order once `status` is `SUCCESS`, or on `PAYMENT.CAPTURE.COMPLETED`.
 
 ---
 
