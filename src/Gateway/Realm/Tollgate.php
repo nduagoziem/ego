@@ -16,7 +16,7 @@ class Tollgate
 
 			$this->builder[$property] = $arguments[0];
 		} else {
-			throw new \RuntimeException(sprintf('Missing %s method.'));
+			throw new \RuntimeException(sprintf('Missing %s method.', $name));
 		}
 	}
 

@@ -33,6 +33,14 @@ return [
             'secret_key' => env("BUDPAY_SECRET_KEY"),
             'public_key' => env("BUDPAY_PUBLIC_KEY")
         ],
+        'paypal' => [
+            'client_id' => env('PAYPAL_CLIENT_ID'),
+            'client_secret' => env('PAYPAL_CLIENT_SECRET'),
+            'url' => env('PAYPAL_URL', 'https://api-m.sandbox.paypal.com'),
+            'bn_code' => env('PAYPAL_BN_CODE'),
+            'paypal_webhook_id' => env('PAYPAL_WEBHOOK_ID'),
+            'is_active' => env('PAYPAL_IS_ACTIVE', false),
+        ],
     ],
 
     'providers' => [
@@ -42,5 +50,6 @@ return [
         "credo" => Emmy\Ego\Gateway\Credo\Credo::class,
         'nomba' => Emmy\Ego\Gateway\Nomba\Nomba::class,
         'budpay' => Emmy\Ego\Gateway\BudPay\BudPay::class,
+        'paypal' => Emmy\Ego\Gateway\Paypal\Paypal::class,
     ],
 ];
